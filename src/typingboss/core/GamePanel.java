@@ -1,5 +1,6 @@
 package typingboss.core;
 
+import typingboss.audio.Music;
 import typingboss.audio.Sfx;
 import typingboss.logic.TypingEngine;
 import typingboss.model.Boss;
@@ -28,10 +29,11 @@ public class GamePanel extends JPanel implements KeyListener {
     private static final double DRAIN_PER_FIGHT = 85;    // player HP lost over a full timer (damage over time)
     private static final double HARDCORE_PENALTY = 1.0;  // seconds taken off the timer per error in Hardcore
     private static final int DAMAGE_PER_LETTER = 2;      // word length decides boss damage
-    private static final int FREE_SECONDS = 60, FREE_COLS = 36, FREE_WORDS = 300;
+    private static final int[] FREE_OPTIONS = { 5, 15, 30, 60 };   // Free Mode durations (seconds)
+    private static final int FREE_COLS = 36, FREE_WORDS = 300;
     private static final Color GOLD = new Color(255, 215, 90), RED = new Color(235, 70, 70), GREEN = new Color(90, 230, 110);
 
-    private enum State { MENU, MODE_SELECT, INTRO, FIGHT, DEFEATED, FREE_PLAY, RESULTS, LOST }
+    private enum State { MENU, MODE_SELECT, FREE_SELECT, INTRO, FIGHT, DEFEATED, FREE_PLAY, RESULTS, LOST }
 
     private final List<Boss> roster = Boss.roster();
     private final Fx fx = new Fx();
@@ -40,11 +42,11 @@ public class GamePanel extends JPanel implements KeyListener {
     private Boss boss;
     private TypingEngine engine;
     private boolean free, hardcore, freeStarted;
-    private int bossIdx, fightWords, selected, freeIdx;
+    private int bossIdx, fightWords, selected, freeIdx, freeSeconds = 60;
     private List<String> freeWords = new ArrayList<>();
     private int[] wordLine = new int[0], wordCol = new int[0];
     private FightResult result;
-    private final Rectangle[] buttons = { new Rectangle(), new Rectangle(), new Rectangle() };
+    private final Rectangle[] buttons = { new Rectangle(), new Rectangle(), new Rectangle(), new Rectangle(), new Rectangle() };
     private double bossHp, timeLeft, fightTime, playerHp, penaltyT, clock, stateT, wordAge, wordOffset;
     private long lastNanos = System.nanoTime();
 
@@ -72,13 +74,14 @@ public class GamePanel extends JPanel implements KeyListener {
             update(dt);
             repaint();
         }).start();
+        Music.playMenu();
     }
 
     // ---------- game logic ----------
 
     private void setState(State s) { state = s; stateT = 0; }
 
-    private void toMenu() { fx.clear(); selected = 0; setState(State.MENU); }
+    private void toMenu() { fx.clear(); selected = 0; setState(State.MENU); Music.playMenu(); }
 
     private void startFight(int idx) {
         free = false; fightTime = 0; penaltyT = 0;
@@ -86,11 +89,12 @@ public class GamePanel extends JPanel implements KeyListener {
         bossHp = boss.hp(); timeLeft = boss.seconds(); playerHp = 100; fightWords = 0;
         engine = new TypingEngine(boss.difficulty());
         fx.clear(); spawnWord(); setState(State.INTRO);
+        Music.playRandom();
     }
 
     /** Free Mode: a fixed list of words laid out in lines, timed, no bosses. */
     private void startFree() {
-        free = true; freeStarted = false; freeIdx = 0; fightWords = 0; fightTime = 0; timeLeft = FREE_SECONDS;
+        free = true; freeStarted = false; freeIdx = 0; fightWords = 0; fightTime = 0; timeLeft = freeSeconds;
         List<String> pool = WordBank.filter(3, 9);
         freeWords = new ArrayList<>();
         wordLine = new int[FREE_WORDS]; wordCol = new int[FREE_WORDS];
@@ -106,6 +110,7 @@ public class GamePanel extends JPanel implements KeyListener {
         engine = new TypingEngine(Difficulty.NORMAL);
         engine.load(freeWords.get(0));
         fx.clear(); setState(State.FREE_PLAY);
+        Music.playRandom();
     }
 
     private void spawnWord() { wordAge = 0; wordOffset = (rng.nextDouble() - .5) * 280; }
@@ -188,7 +193,11 @@ public class GamePanel extends JPanel implements KeyListener {
     private void activate(int i) {
         switch (state) {
             case MENU -> {
-                if (i == 0) startFree();
+                if (i == 0) {
+                    selected = 0;
+                    for (int k = 0; k < FREE_OPTIONS.length; k++) if (FREE_OPTIONS[k] == freeSeconds) selected = k;
+                    setState(State.FREE_SELECT);
+                }
                 else if (i == 1) { selected = 0; setState(State.MODE_SELECT); }
                 else System.exit(0);
             }
@@ -196,11 +205,16 @@ public class GamePanel extends JPanel implements KeyListener {
                 if (i == 2) { setState(State.MENU); selected = 1; }
                 else { hardcore = i == 1; startFight(0); }
             }
+            case FREE_SELECT -> {
+                if (i == FREE_OPTIONS.length) { setState(State.MENU); selected = 0; }
+                else { freeSeconds = FREE_OPTIONS[i]; startFree(); }
+            }
             default -> choose(i);
         }
     }
 
     private int optionCount() {
+        if (state == State.FREE_SELECT) return FREE_OPTIONS.length + 1;
         return state == State.MENU || state == State.MODE_SELECT ? 3 : state == State.RESULTS || state == State.LOST ? 2 : 0;
     }
 
@@ -224,7 +238,7 @@ public class GamePanel extends JPanel implements KeyListener {
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
         g.drawImage(Assets.img("bg"), 0, 0, W, H, null);
-        if (state == State.MENU || state == State.MODE_SELECT) drawMenu(g);
+        if (state == State.MENU || state == State.MODE_SELECT || state == State.FREE_SELECT) drawMenu(g);
         else if (free) { drawFree(g); if (state == State.RESULTS) drawResults(g); }
         else drawFight(g);
         g.dispose();
@@ -237,31 +251,43 @@ public class GamePanel extends JPanel implements KeyListener {
     }
 
     private void drawMenu(Graphics2D g) {
-        boolean sub = state == State.MODE_SELECT;
+        boolean sub = state == State.MODE_SELECT, pick = state == State.FREE_SELECT;
         Hud.dim(g, W, H, 110);
         Hud.text(g, "TYPE SLAYER", W / 2, 120, 84, GOLD, 0);
-        Hud.text(g, sub ? "BOSS FIGHT - CHOOSE A MODE" : "Type fast. Slay the bosses. Don't die.", W / 2, 165, 22, Color.WHITE, 0);
+        Hud.text(g, sub ? "BOSS FIGHT - CHOOSE A MODE" : pick ? "FREE MODE - CHOOSE A DURATION" : "Type fast. Slay the bosses. Don't die.", W / 2, 165, 22, Color.WHITE, 0);
         for (int i = 0; i < roster.size(); i++) {
             int x = i < 2 ? 90 : 742, y = 195 + (i % 2) * 145 + (int) (Math.sin(clock * 2 + i) * 6);
             g.drawImage(Assets.img(roster.get(i).sprite()), x, y, 128, 128, null);
         }
-        String[] labels = sub ? new String[]{"NORMAL MODE", "HARDCORE MODE", "BACK"} : new String[]{"FREE MODE", "BOSS FIGHT", "EXIT"};
-        String[] desc = sub
-            ? new String[]{"Beat each boss before the timer runs out.", "Like Normal, but every error costs 1 second.", "Back to the main menu."}
-            : new String[]{"Type for " + FREE_SECONDS + " seconds. No bosses, just the words.", "Defeat " + roster.size() + " bosses before time runs out.", "Close the game."};
-        for (int i = 0; i < 3; i++) {
-            buttons[i].setBounds(W / 2 - 170, 215 + i * 80, 340, 60);
-            drawButton(g, buttons[i], labels[i], i == selected, sub && i == 1 ? RED : GOLD, 26);
+        String[] labels, desc;
+        if (pick) {
+            int n = FREE_OPTIONS.length;
+            labels = new String[n + 1]; desc = new String[n + 1];
+            for (int i = 0; i < n; i++) {
+                labels[i] = FREE_OPTIONS[i] + " SECONDS";
+                desc[i] = "Type for " + FREE_OPTIONS[i] + " seconds. No bosses, just the words.";
+            }
+            labels[n] = "BACK"; desc[n] = "Back to the main menu.";
+        } else {
+            labels = sub ? new String[]{"NORMAL MODE", "HARDCORE MODE", "BACK"} : new String[]{"FREE MODE", "BOSS FIGHT", "EXIT"};
+            desc = sub
+                ? new String[]{"Beat each boss before the timer runs out.", "Like Normal, but every error costs 1 second.", "Back to the main menu."}
+                : new String[]{"Pick 5, 15, 30 or 60 seconds. No bosses, just the words.", "Defeat " + roster.size() + " bosses before time runs out.", "Close the game."};
         }
-        Hud.text(g, desc[selected], W / 2, 500, 18, Color.LIGHT_GRAY, 0);
-        Hud.text(g, "ARROWS to select   ENTER to confirm", W / 2, 560, 14, Color.GRAY, 0);
+        int top = pick ? 190 : 215, gap = pick ? 64 : 80, bh = pick ? 52 : 60;
+        for (int i = 0; i < labels.length; i++) {
+            buttons[i].setBounds(W / 2 - 170, top + i * gap, 340, bh);
+            drawButton(g, buttons[i], labels[i], i == selected, sub && i == 1 ? RED : GOLD, pick ? 24 : 26);
+        }
+        Hud.text(g, desc[selected], W / 2, pick ? 535 : 500, 18, Color.LIGHT_GRAY, 0);
+        Hud.text(g, "ARROWS to select   ENTER to confirm", W / 2, pick ? 575 : 560, 14, Color.GRAY, 0);
     }
 
     private void drawFree(Graphics2D g) {
-        Hud.text(g, "FREE MODE", 40, 50, 26, GOLD, -1);
+        Hud.text(g, "FREE MODE - " + freeSeconds + "s", 40, 50, 26, GOLD, -1);
         Hud.text(g, "ESC - menu", W - 40, 50, 16, Color.GRAY, 1);
         int t = (int) Math.ceil(Math.max(0, timeLeft));
-        boolean urgent = freeStarted && timeLeft <= 10;
+        boolean urgent = freeStarted && timeLeft <= Math.min(10, freeSeconds / 3.0);
         Hud.text(g, String.format("%02d:%02d", t / 60, t % 60), W / 2, 125, 64, urgent && Math.sin(clock * 12) > 0 ? RED : Color.WHITE, 0);
         if (!freeStarted && (int) (clock * 2) % 2 == 0) Hud.text(g, "Start typing to begin", W / 2, 162, 18, Color.LIGHT_GRAY, 0);
 
@@ -379,7 +405,7 @@ public class GamePanel extends JPanel implements KeyListener {
         g.setColor(accent); g.setStroke(new BasicStroke(4)); g.drawRect(px, py, pw, ph);
         String title = free ? "TIME'S UP!" : lost ? "YOU DIED" : last ? "ALL BOSSES SLAIN!" : "BOSS DEFEATED!";
         Hud.text(g, title, W / 2, py + 68, title.length() > 14 || free || lost ? 40 : 46, accent, 0);
-        String sub = free ? "FREE MODE" : boss.name().toUpperCase() + "  [" + boss.difficulty().label + "]" + (hardcore ? "  HARDCORE" : "");
+        String sub = free ? "FREE MODE - " + freeSeconds + " SECONDS" : boss.name().toUpperCase() + "  [" + boss.difficulty().label + "]" + (hardcore ? "  HARDCORE" : "");
         Hud.text(g, sub, W / 2, py + 104, 20, free ? Color.WHITE : boss.difficulty().color, 0);
 
         String[][] rows = {
@@ -415,6 +441,7 @@ public class GamePanel extends JPanel implements KeyListener {
         int k = e.getKeyCode(), n = optionCount();
         if (k == KeyEvent.VK_ESCAPE) {
             if (state == State.MODE_SELECT) { setState(State.MENU); selected = 1; }
+            else if (state == State.FREE_SELECT) { setState(State.MENU); selected = 0; }
             else if (state != State.MENU) toMenu();
         }
         else if (k == KeyEvent.VK_ENTER && n > 0) activate(selected);
@@ -424,3 +451,4 @@ public class GamePanel extends JPanel implements KeyListener {
 
     @Override public void keyReleased(KeyEvent e) { }
 }
+ 
