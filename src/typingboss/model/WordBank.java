@@ -3,7 +3,6 @@ package typingboss.model;
 import java.util.Arrays;
 import java.util.List;
 
-/** All words the game can spawn. Filtered by length per difficulty. */
 public final class WordBank {
     private static final String WORDS =
         "cat sun bat map sky fire ice wind rock sand moon star gold sword shield flame storm night blade arrow " +

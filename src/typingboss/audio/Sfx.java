@@ -6,7 +6,6 @@ import javax.sound.sampled.LineEvent;
 import java.io.BufferedInputStream;
 import java.io.InputStream;
 
-/** Fire-and-forget sound effects from /sfx. Fails silently if no audio device exists. */
 public final class Sfx {
     private Sfx() {}
 

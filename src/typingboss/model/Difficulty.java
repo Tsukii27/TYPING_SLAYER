@@ -2,7 +2,6 @@ package typingboss.model;
 
 import java.awt.Color;
 
-/** Each difficulty controls the word length range used for a boss. */
 public enum Difficulty {
     EASY("EASY", new Color(0x5BD65B), 3, 5),
     NORMAL("NORMAL", new Color(0xF2C94C), 4, 7),

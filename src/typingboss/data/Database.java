@@ -15,46 +15,33 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * Tiny text-file "database": data/players.csv, data/scores.csv and data/kills.csv.
- * Everything is read into memory once; every change is also appended to the file.
- * If the file can't be written the game keeps working from memory.
- */
 public final class Database {
     public static final int MAX_NAME = 12;
     private static final String PLAYERS_HEADER = "name,created";
     private static final String SCORES_HEADER = "name,mode,wpm,accuracy,words,seconds,bosses,date";
     private static final String KILLS_HEADER = "name,mode,boss,date";
 
-    /** One leaderboard entry. mode is FREE-5 / FREE-15 / FREE-30 / FREE-60 / NORMAL / HARDCORE; bosses is 0 in Free Mode. */
     public record Score(String name, String mode, double wpm, double accuracy, int words, double seconds, int bosses, String date) {}
 
-    /** Boss kills of one player: all together and per mode. */
     public record Slayer(String name, int total, int normal, int hardcore) {}
 
     private static Path dir;
-    private static List<String[]> kills;   // one entry per boss defeated: {name, mode, boss}
+    private static List<String[]> kills;
     private static List<String> players;
     private static List<Score> scores;
 
     private Database() {}
 
-    // ---------- names ----------
-
-    /** Characters allowed in a player name (also keeps the CSV safe: no commas). */
     public static boolean allowed(char c) {
         return (c < 128 && Character.isLetterOrDigit(c)) || c == ' ' || c == '_' || c == '-';
     }
 
-    /** Removes bad characters, trims, collapses double spaces and cuts to MAX_NAME. */
     public static String cleanName(String raw) {
         StringBuilder sb = new StringBuilder();
         for (char c : raw.toCharArray()) if (allowed(c)) sb.append(c);
         String s = sb.toString().trim().replaceAll(" +", " ");
         return s.length() > MAX_NAME ? s.substring(0, MAX_NAME).trim() : s;
     }
-
-    // ---------- players ----------
 
     public static List<String> players() { load(); return new ArrayList<>(players); }
 
@@ -64,7 +51,6 @@ public final class Database {
         return false;
     }
 
-    /** Returns false if the name is empty or already taken (case-insensitive). */
     public static boolean addPlayer(String raw) {
         load();
         String name = cleanName(raw);
@@ -74,15 +60,12 @@ public final class Database {
         return true;
     }
 
-    /** Highest WPM this player ever got, or -1 if they have no scores yet. */
     public static double bestWpm(String name) {
         load();
         double best = -1;
         for (Score s : scores) if (s.name().equalsIgnoreCase(name)) best = Math.max(best, s.wpm());
         return best;
     }
-
-    // ---------- scores ----------
 
     public static void addScore(Score s) {
         load();
@@ -91,10 +74,6 @@ public final class Database {
             s.name(), s.mode(), s.wpm(), s.accuracy(), s.words(), s.seconds(), s.bosses(), s.date()));
     }
 
-    /**
-     * Best entry of each player for one mode, ranked.
-     * Free Mode: WPM, then accuracy. Boss modes: bosses beaten, then WPM, then accuracy.
-     */
     public static List<Score> top(String mode, int limit) {
         load();
         Comparator<Score> better = mode.startsWith("FREE")
@@ -110,19 +89,15 @@ public final class Database {
         return out.size() > limit ? new ArrayList<>(out.subList(0, limit)) : out;
     }
 
-    // ---------- boss kills ----------
-
-    /** Call once every time a boss is defeated. */
     public static void addKill(String name, String mode, String boss) {
         load();
         kills.add(new String[]{name, mode, boss});
         append("kills.csv", KILLS_HEADER, name + "," + mode + "," + boss + "," + LocalDate.now());
     }
 
-    /** Players ranked by total bosses slain (Hardcore kills break ties). */
     public static List<Slayer> slayers(int limit) {
         load();
-        Map<String, int[]> count = new LinkedHashMap<>();   // lower-case name -> {normal, hardcore}
+        Map<String, int[]> count = new LinkedHashMap<>(); 
         Map<String, String> shown = new HashMap<>();
         for (String[] k : kills) {
             String key = k[0].toLowerCase();
@@ -138,9 +113,6 @@ public final class Database {
         return out.size() > limit ? new ArrayList<>(out.subList(0, limit)) : out;
     }
 
-    // ---------- file handling ----------
-
-    /** data/ next to where the game is run; falls back to ~/.typeslayer if that folder can't be written. */
     private static Path dir() {
         if (dir != null) return dir;
         Path[] options = { Paths.get("data"), Paths.get(System.getProperty("user.home"), ".typeslayer") };
@@ -167,7 +139,7 @@ public final class Database {
             try {
                 scores.add(new Score(f[0], f[1], Double.parseDouble(f[2]), Double.parseDouble(f[3]),
                     Integer.parseInt(f[4]), Double.parseDouble(f[5]), Integer.parseInt(f[6]), f[7]));
-            } catch (RuntimeException ignored) { }   // bad line: skip it
+            } catch (RuntimeException ignored) { }  
         }
         for (String line : readLines("kills.csv")) {
             String[] f = line.split(",", -1);
@@ -175,7 +147,6 @@ public final class Database {
         }
     }
 
-    /** Data lines only: no header, no blank lines. */
     private static List<String> readLines(String file) {
         List<String> out = new ArrayList<>();
         try {

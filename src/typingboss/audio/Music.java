@@ -8,27 +8,22 @@ import java.io.BufferedInputStream;
 import java.io.InputStream;
 import java.util.Random;
 
-/**
- * Looping background music streamed from /sfx (the files are too big to load as a Clip).
- * Only one track plays at a time. Fails silently if no audio device or file exists.
- */
 public final class Music {
     private static final String MENU_TRACK = "main_bgm";
     private static final String[] FIGHT_TRACKS = { "bgm_1", "bgm_2", "bgm_3", "bgm_4", "bgm_5" };
-    private static final float GAIN_DB = -6f;   // keeps the music under the sound effects
+    private static final float GAIN_DB = -6f;  
     private static final Random RNG = new Random();
 
-    private static int generation;              // bumped on every change; an old thread sees it and exits
+    private static volatile boolean paused;
+    private static int generation;            
     private static String current = "", lastFight = "";
 
     private Music() {}
 
-    /** Main menu theme. Does nothing if it is already playing, so moving between menus won't restart it. */
     public static synchronized void playMenu() {
         if (!MENU_TRACK.equals(current)) start(MENU_TRACK);
     }
 
-    /** Random fight / free mode track, never the same one twice in a row. */
     public static synchronized void playRandom() {
         String t;
         do { t = FIGHT_TRACKS[RNG.nextInt(FIGHT_TRACKS.length)]; } while (t.equals(lastFight));
@@ -36,11 +31,16 @@ public final class Music {
         start(t);
     }
 
-    public static synchronized void stop() { generation++; current = ""; }
+    public static synchronized void stop() { generation++; current = ""; paused = false; }
+
+    public static void pause() { paused = true; }
+
+    public static void resume() { paused = false; }
 
     private static void start(String name) {
         int gen = ++generation;
         current = name;
+        paused = false;
         Thread t = new Thread(() -> stream(name, gen), "music");
         t.setDaemon(true);
         t.start();
@@ -52,11 +52,11 @@ public final class Music {
         SourceDataLine line = null;
         byte[] buf = new byte[8192];
         try {
-            while (active(gen)) {   // re-open the file each pass so the track loops
+            while (active(gen)) {   
                 try (InputStream in = Music.class.getResourceAsStream("/sfx/" + name + ".wav");
                      AudioInputStream ais = AudioSystem.getAudioInputStream(new BufferedInputStream(in))) {
                     if (line == null) {
-                        // ~0.25s buffer, so a track change cuts off almost immediately
+                      
                         int size = ais.getFormat().getFrameSize() * (int) ais.getFormat().getFrameRate() / 4;
                         line = AudioSystem.getSourceDataLine(ais.getFormat());
                         line.open(ais.getFormat(), size);
@@ -64,7 +64,15 @@ public final class Music {
                         line.start();
                     }
                     int n;
-                    while (active(gen) && (n = ais.read(buf)) > 0) line.write(buf, 0, n);
+                    while (active(gen) && (n = ais.read(buf)) > 0) {
+                        if (paused) {
+                            line.stop();   
+                            while (paused && active(gen)) Thread.sleep(50);
+                            if (!active(gen)) break;
+                            line.start();
+                        }
+                        line.write(buf, 0, n);
+                    }
                 }
             }
         } catch (Exception ignored) {

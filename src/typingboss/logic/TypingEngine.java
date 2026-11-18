@@ -6,7 +6,6 @@ import typingboss.model.WordBank;
 import java.util.List;
 import java.util.Random;
 
-/** Handles the current word, per-key validation and accuracy. No rendering here. */
 public class TypingEngine {
     public enum Result { CORRECT, WRONG, COMPLETE }
 
@@ -21,17 +20,14 @@ public class TypingEngine {
         next();
     }
 
-    /** Picks a new random word (never the same one twice in a row). */
     public void next() {
         String w;
         do { w = pool.get(rng.nextInt(pool.size())); } while (w.equals(last) && pool.size() > 1);
         word = last = w; index = 0; error = false;
     }
 
-    /** Loads a specific word (used by Free Mode, where the word list is fixed). Counters are kept. */
     public void load(String w) { word = last = w; index = 0; error = false; }
 
-    /** A wrong key is marked as an error immediately and lowers accuracy. */
     public Result type(char c) {
         if (Character.toLowerCase(c) == word.charAt(index)) {
             correct++; error = false; index++;

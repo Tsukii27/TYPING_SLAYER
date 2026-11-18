@@ -18,29 +18,36 @@ import java.awt.event.KeyListener;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.AffineTransform;
+import java.awt.geom.Point2D;
 import java.awt.image.BufferedImage;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-/** Game loop, state machine and rendering. Typing rules live in TypingEngine. */
 public class GamePanel extends JPanel implements KeyListener {
     public static final int W = 960, H = 600;
-    private static final double MISTAKE_DAMAGE = 4;      // player HP lost per wrong key (boss modes)
-    private static final double DRAIN_PER_FIGHT = 85;    // player HP lost over a full timer (damage over time)
-    private static final double HARDCORE_PENALTY = 1.0;  // seconds taken off the timer per error in Hardcore
-    private static final int DAMAGE_PER_LETTER = 2;      // word length decides boss damage
-    private static final int[] FREE_OPTIONS = { 5, 15, 30, 60 };   // Free Mode durations (seconds)
+    private static final double MISTAKE_DAMAGE = 4;    
+    private static final double DRAIN_PER_FIGHT = 85;  
+    private static final double HARDCORE_PENALTY = 1.0; 
+    private static final int DAMAGE_PER_LETTER = 2;      
+    private static final int[] FREE_OPTIONS = { 5, 15, 30, 60 };   
     private static final int FREE_COLS = 36, FREE_WORDS = 300;
     private static final String[] LB_MODES = { "FREE-5", "FREE-15", "FREE-30", "FREE-60", "NORMAL", "HARDCORE", "SLAYERS" };
     private static final String[] LB_LABELS = { "FREE 5s", "FREE 15s", "FREE 30s", "FREE 60s", "NORMAL", "HARDCORE", "SLAYERS" };
-    private static final int LOAD_ROWS = 5;   // players visible at once on the Load Game screen
+    private static final double[][] FLICKER_OFF = { {0.00, 0.07}, {0.15, 0.20}, {0.27, 0.45}, {0.50, 0.62} };
+    private static final double FLICKER_LEN = 0.7;
+    private static final double BROWNOUT_CHANCE = 0.3;  
+    private static final double BACKWARDS_CHANCE = 0.35, LAUGH_LEN = 1.2;
+    private static final Color PINK = new Color(255, 80, 210);
+    private static final Color[] CONFETTI = { PINK, new Color(255, 215, 90), new Color(80, 200, 255), new Color(120, 230, 110), new Color(255, 120, 60) };
+    private static final int LOAD_ROWS = 5;  
     private static final Color GOLD = new Color(255, 215, 90), RED = new Color(235, 70, 70), GREEN = new Color(90, 230, 110);
 
-    private enum State { TITLE, NAME_ENTRY, LOAD_SELECT, LEADERBOARD, MENU, MODE_SELECT, FREE_SELECT, INTRO, FIGHT, DEFEATED, FREE_PLAY, RESULTS, LOST }
+    private enum State { TITLE, NAME_ENTRY, LOAD_SELECT, LEADERBOARD, MENU, MODE_SELECT, FREE_SELECT, INTRO, FIGHT, DEFEATED, FREE_PLAY, PAUSED, RESULTS, LOST }
 
     private final List<Boss> roster = Boss.roster();
+    private final List<Boss> menuArt = roster.stream().filter(b -> b.trait() == Boss.Trait.NONE).limit(4).toList();
     private final Fx fx = new Fx();
     private final Random rng = new Random();
     private State state = State.TITLE;
@@ -52,17 +59,26 @@ public class GamePanel extends JPanel implements KeyListener {
     private int[] wordLine = new int[0], wordCol = new int[0];
     private FightResult result;
     private final Rectangle[] buttons = java.util.stream.Stream.generate(Rectangle::new).limit(8).toArray(Rectangle[]::new);
-    // player profile, name entry, load list and leaderboard
     private String player = "", nameInput = "", nameMsg = "";
     private List<String> players = new ArrayList<>();
     private List<Database.Score> lbRows = new ArrayList<>();
     private List<Database.Slayer> slayRows = new ArrayList<>();
     private State lbReturn = State.TITLE;
+    private State pausedFrom = State.FIGHT; 
     private int scroll, lbTab, lbCacheTab = -1;
-    // totals of the current boss run (kept across Next Boss / Retry, reset by beginRun)
     private int runBosses, runWords, runCorrect, runWrong;
     private double runSeconds;
     private double bossHp, timeLeft, fightTime, playerHp, penaltyT, clock, stateT, wordAge, wordOffset;
+    private double flickerT = -1, nextFlicker;   
+
+    private boolean backwards;
+    private double laughT = -1;
+   
+    private boolean brownout, brownoutNext;
+    private char[] brownLetters = new char[0];
+    private int brownIdx, brownX, brownY;
+    private double brownT;
+    private BufferedImage darkness;               
     private long lastNanos = System.nanoTime();
 
     public GamePanel() {
@@ -92,8 +108,6 @@ public class GamePanel extends JPanel implements KeyListener {
         Music.playMenu();
     }
 
-    // ---------- game logic ----------
-
     private void setState(State s) { state = s; stateT = 0; }
 
     private void toMenu() { fx.clear(); selected = 0; setState(State.MENU); Music.playMenu(); }
@@ -102,12 +116,14 @@ public class GamePanel extends JPanel implements KeyListener {
         free = false; fightTime = 0; penaltyT = 0;
         bossIdx = idx; boss = roster.get(idx);
         bossHp = boss.hp(); timeLeft = boss.seconds(); playerHp = 100; fightWords = 0;
+        flickerT = -1; nextFlicker = 3 + rng.nextDouble() * 2; brownout = brownoutNext = false;
+        backwards = false; laughT = -1;
         engine = new TypingEngine(boss.difficulty());
         fx.clear(); spawnWord(); setState(State.INTRO);
         Music.playRandom();
     }
 
-    /** Free Mode: a fixed list of words laid out in lines, timed, no bosses. */
+
     private void startFree() {
         free = true; freeStarted = false; freeIdx = 0; fightWords = 0; fightTime = 0; timeLeft = freeSeconds;
         List<String> pool = WordBank.filter(3, 9);
@@ -131,6 +147,8 @@ public class GamePanel extends JPanel implements KeyListener {
     private void spawnWord() { wordAge = 0; wordOffset = (rng.nextDouble() - .5) * 280; }
 
     private void update(double dt) {
+        if (state == State.PAUSED) { clock += dt; return; }   
+        if (laughT >= 0 && (laughT += dt) >= LAUGH_LEN) laughT = -1;
         clock += dt; stateT += dt; wordAge += dt; fx.update(dt);
         penaltyT = Math.max(0, penaltyT - dt);
         switch (state) {
@@ -138,10 +156,11 @@ public class GamePanel extends JPanel implements KeyListener {
             case FIGHT -> {
                 timeLeft -= dt; fightTime += dt;
                 playerHp -= dt * DRAIN_PER_FIGHT / boss.seconds();
+                if (boss.horror()) updateFlicker(dt);
                 if (timeLeft <= 0 || playerHp <= 0) { playerHp = 0; timeLeft = Math.max(0, timeLeft); Sfx.play("lose"); finishFight(State.LOST); }
             }
             case FREE_PLAY -> {
-                if (freeStarted) {   // timer starts on the first keystroke
+                if (freeStarted) {   
                     timeLeft -= dt; fightTime += dt;
                     if (timeLeft <= 0) { timeLeft = 0; Sfx.play("win"); finishFight(State.RESULTS); }
                 }
@@ -156,14 +175,68 @@ public class GamePanel extends JPanel implements KeyListener {
         }
     }
 
+    private void updateFlicker(double dt) {
+        if (brownout) { brownT += dt; return; }
+        if (flickerT >= 0) {
+            flickerT += dt;
+            if (flickerT >= FLICKER_LEN) {
+                flickerT = -1;
+                if (brownoutNext) startBrownout();
+            }
+        } else if ((nextFlicker -= dt) <= 0) {
+            flickerT = 0;
+            brownoutNext = rng.nextDouble() < BROWNOUT_CHANCE;
+            nextFlicker = 2.5 + rng.nextDouble() * 3.5;
+            Sfx.play("flicker");
+        }
+    }
+
+    private void startBrownout() {
+        brownoutNext = false; brownout = true; brownT = 0; brownIdx = 0;
+        brownLetters = new char[3 + rng.nextInt(3)];   
+        for (int i = 0; i < brownLetters.length; i++) {
+            char c;
+            do { c = (char) ('a' + rng.nextInt(26)); } while (i > 0 && c == brownLetters[i - 1]);   
+            brownLetters[i] = c;
+        }
+        brownX = (int) ((rng.nextDouble() - .5) * 300);
+        brownY = 240 + rng.nextInt(110);
+        Sfx.play("brownout");
+    }
+
+    private void handleBrownoutKey(char c) {
+        if (Character.toLowerCase(c) != brownLetters[brownIdx]) { mistake(); return; }
+        Sfx.play("key");
+        if (++brownIdx == brownLetters.length) {
+            brownout = false;
+            flickerT = 0.46;   
+            Sfx.play("poweron");
+        }
+    }
+
+    private void twistWord() {
+        String w = engine.word(), r = new StringBuilder(w).reverse().toString();
+        backwards = !r.equals(w) && rng.nextDouble() < BACKWARDS_CHANCE;
+        if (backwards) { engine.load(r); laughT = 0; Sfx.play("laugh"); }
+    }
+
+    private void mistake() {
+        playerHp -= MISTAKE_DAMAGE;
+        if (hardcore) { timeLeft -= HARDCORE_PENALTY; penaltyT = 0.6; }
+        Sfx.play("error");
+    }
+
+    private boolean flickerOff() {
+        if (flickerT < 0) return false;
+        for (double[] o : FLICKER_OFF) if (flickerT >= o[0] && flickerT < o[1]) return true;
+        return false;
+    }
+
     private void handleTyping(char c) {
+        if (brownout) { handleBrownoutKey(c); return; }
         switch (engine.type(c)) {
             case CORRECT -> Sfx.play("key");
-            case WRONG -> {
-                playerHp -= MISTAKE_DAMAGE;
-                if (hardcore) { timeLeft -= HARDCORE_PENALTY; penaltyT = 0.6; }
-                Sfx.play("error");
-            }
+            case WRONG -> mistake();
             case COMPLETE -> {
                 fightWords++;
                 int dmg = engine.word().length() * DAMAGE_PER_LETTER;
@@ -171,7 +244,7 @@ public class GamePanel extends JPanel implements KeyListener {
                 fx.hit(dmg, W / 2.0, 200);
                 Sfx.play("hit");
                 if (bossHp <= 0) { Sfx.play("kill"); finishFight(State.DEFEATED); }
-                else { engine.next(); spawnWord(); }
+                else { engine.next(); spawnWord(); if (boss.clown()) twistWord(); }
             }
         }
     }
@@ -189,7 +262,6 @@ public class GamePanel extends JPanel implements KeyListener {
         }
     }
 
-    /** Freezes this run's stats for the results panel. */
     private void finishFight(State next) {
         selected = 0;
         result = FightResult.of(engine.correct(), engine.accuracy(), fightWords, fightTime);
@@ -197,13 +269,15 @@ public class GamePanel extends JPanel implements KeyListener {
         setState(next);
     }
 
+    private void pause() {
+        pausedFrom = state; selected = 0; state = State.PAUSED;
+        Music.pause();
+    }
+
+    private void resume() { state = pausedFrom; Music.resume(); }
+
     private void beginRun() { runBosses = runWords = runCorrect = runWrong = 0; runSeconds = 0; }
 
-    /**
-     * Saves the finished fight to the leaderboard. Free Mode: one entry per timed run.
-     * Boss modes: one entry for the whole run so far (bosses beaten, overall WPM / accuracy);
-     * the leaderboard only shows each player's best entry, so repeated saves are fine.
-     */
     private void record(State next) {
         if (player.isEmpty()) return;
         String today = LocalDate.now().toString();
@@ -215,7 +289,7 @@ public class GamePanel extends JPanel implements KeyListener {
         runCorrect += engine.correct(); runWrong += engine.wrong(); runWords += fightWords; runSeconds += result.seconds();
         if (next == State.DEFEATED) {
             runBosses = Math.max(runBosses, bossIdx + 1);
-            Database.addKill(player, hardcore ? "HARDCORE" : "NORMAL", boss.name());   // counts every boss slain, replays too
+            Database.addKill(player, hardcore ? "HARDCORE" : "NORMAL", boss.name());   
         }
         if (runBosses == 0) return;
         int keys = runCorrect + runWrong;
@@ -223,7 +297,6 @@ public class GamePanel extends JPanel implements KeyListener {
         Database.addScore(new Database.Score(player, hardcore ? "HARDCORE" : "NORMAL", wpm, acc, runWords, runSeconds, runBosses, today));
     }
 
-    /** Results / game-over panel: 0 = primary (retry / next boss / play again), 1 = main menu. */
     private void choose(int i) {
         if (i == 1) toMenu();
         else if (free) startFree();
@@ -235,7 +308,6 @@ public class GamePanel extends JPanel implements KeyListener {
         }
     }
 
-    /** Handles a click / ENTER on whichever button list is on screen. */
     private void activate(int i) {
         switch (state) {
             case TITLE -> {
@@ -272,20 +344,29 @@ public class GamePanel extends JPanel implements KeyListener {
                 if (i == FREE_OPTIONS.length) back();
                 else { freeSeconds = FREE_OPTIONS[i]; startFree(); }
             }
+            case PAUSED -> {
+                switch (i) {
+                    case 0 -> resume();
+                    case 1 -> { if (free) startFree(); else startFight(bossIdx); }  
+                    default -> toMenu();
+                }
+            }
             default -> choose(i);
         }
     }
 
-    /** ESC / BACK: one step back in the menus, or out of a fight. */
+   
     private void back() {
         switch (state) {
             case TITLE -> { }
             case NAME_ENTRY -> { selected = 0; setState(State.TITLE); }
             case LOAD_SELECT -> { selected = 1; setState(State.TITLE); }
             case LEADERBOARD -> closeLeaderboard();
-            case MENU -> { selected = 1; setState(State.TITLE); }   // switch player
+            case MENU -> { selected = 1; setState(State.TITLE); }  
             case MODE_SELECT -> { selected = 1; setState(State.MENU); }
             case FREE_SELECT -> { selected = 0; setState(State.MENU); }
+            case INTRO, FIGHT, FREE_PLAY -> pause();
+            case PAUSED -> resume();
             default -> toMenu();
         }
     }
@@ -311,15 +392,16 @@ public class GamePanel extends JPanel implements KeyListener {
             case MODE_SELECT -> 3;
             case FREE_SELECT -> FREE_OPTIONS.length + 1;
             case NAME_ENTRY -> 2;
-            case LOAD_SELECT -> players.size() + 1;           // every player + BACK
-            case LEADERBOARD -> LB_MODES.length + 1;          // every tab + BACK
+            case LOAD_SELECT -> players.size() + 1;           
+            case LEADERBOARD -> LB_MODES.length + 1;          
+            case PAUSED -> 3;
             case RESULTS, LOST -> 2;
             default -> 0;
         };
     }
 
     private int buttonAt(Point p) {
-        if (state == State.LOAD_SELECT) {   // rows are scrolled, so map the visible row to the real player index
+        if (state == State.LOAD_SELECT) {   
             for (int r = 0; r < LOAD_ROWS; r++) if (scroll + r < players.size() && buttons[r].contains(p)) return scroll + r;
             return buttons[LOAD_ROWS].contains(p) ? players.size() : -1;
         }
@@ -333,7 +415,6 @@ public class GamePanel extends JPanel implements KeyListener {
         return Math.min(1, d);
     }
 
-    // ---------- rendering ----------
 
     @Override
     protected void paintComponent(Graphics gr) {
@@ -342,13 +423,31 @@ public class GamePanel extends JPanel implements KeyListener {
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
         g.drawImage(Assets.img("bg"), 0, 0, W, H, null);
+        State real = state;
+        if (real == State.PAUSED) state = pausedFrom;  
+        try { drawScreen(g); } finally { state = real; }
+        if (real == State.PAUSED) drawPause(g);
+        g.dispose();
+    }
+
+    private void drawScreen(Graphics2D g) {
         if (state == State.TITLE || state == State.MENU || state == State.MODE_SELECT || state == State.FREE_SELECT) drawMenu(g);
         else if (state == State.NAME_ENTRY) drawNameEntry(g);
         else if (state == State.LOAD_SELECT) drawLoad(g);
         else if (state == State.LEADERBOARD) drawLeaderboard(g);
         else if (free) { drawFree(g); if (state == State.RESULTS) drawResults(g); }
         else drawFight(g);
-        g.dispose();
+    }
+
+    private void drawPause(Graphics2D g) {
+        Hud.dim(g, W, H, 250);  
+        Hud.text(g, "PAUSED", W / 2, 170, 72, GOLD, 0);
+        String[] labels = {"RESUME", "RESTART", "MAIN MENU"};
+        for (int i = 0; i < labels.length; i++) {
+            buttons[i].setBounds(W / 2 - 170, 230 + i * 80, 340, 60);
+            drawButton(g, buttons[i], labels[i], i == selected, GOLD, 26);
+        }
+        Hud.text(g, "ESC to resume", W / 2, 530, 16, Color.GRAY, 0);
     }
 
     private void drawButton(Graphics2D g, Rectangle b, String label, boolean sel, Color accent, int size) {
@@ -359,7 +458,7 @@ public class GamePanel extends JPanel implements KeyListener {
 
     private void drawMenu(Graphics2D g) {
         Hud.dim(g, W, H, 110);
-        Hud.text(g, "TYPE SLAYER", W / 2, 120, 84, GOLD, 0);
+        Hud.text(g, "TYPING SLAYER", W / 2, 120, 84, GOLD, 0);
         String subtitle;
         String[] labels, desc;
         switch (state) {
@@ -370,7 +469,7 @@ public class GamePanel extends JPanel implements KeyListener {
             }
             case MENU -> {
                 subtitle = "WELCOME, " + player.toUpperCase();
-                labels = new String[]{"FREE MODE", "BOSS FIGHT", "LEADERBOARD", "SWITCH PLAYER"};
+                labels = new String[]{"SPEED TRIAL", "BOSS FIGHT", "LEADERBOARD", "SWITCH PLAYER"};
                 desc = new String[]{"Pick 5, 15, 30 or 60 seconds. No bosses, just the words.", "Defeat " + roster.size() + " bosses before time runs out.",
                     "Top scores for every mode.", "Back to the title screen."};
             }
@@ -379,8 +478,8 @@ public class GamePanel extends JPanel implements KeyListener {
                 labels = new String[]{"NORMAL MODE", "HARDCORE MODE", "BACK"};
                 desc = new String[]{"Beat each boss before the timer runs out.", "Like Normal, but every error costs 1 second.", "Back to the main menu."};
             }
-            default -> {   // FREE_SELECT
-                subtitle = "FREE MODE - CHOOSE A DURATION";
+            default -> {   
+                subtitle = "SPEED TRIAL - CHOOSE A DURATION";
                 int n = FREE_OPTIONS.length;
                 labels = new String[n + 1]; desc = new String[n + 1];
                 for (int i = 0; i < n; i++) {
@@ -392,11 +491,11 @@ public class GamePanel extends JPanel implements KeyListener {
         }
         Hud.text(g, subtitle, W / 2, 165, 22, Color.WHITE, 0);
         if (state != State.TITLE) Hud.text(g, "PLAYER: " + player, 20, 30, 16, Color.LIGHT_GRAY, -1);
-        for (int i = 0; i < roster.size(); i++) {
+        for (int i = 0; i < menuArt.size(); i++) {
             int x = i < 2 ? 90 : 742, y = 195 + (i % 2) * 145 + (int) (Math.sin(clock * 2 + i) * 6);
-            g.drawImage(Assets.img(roster.get(i).sprite()), x, y, 128, 128, null);
+            g.drawImage(Assets.img(menuArt.get(i).sprite()), x, y, 128, 128, null);
         }
-        boolean compact = labels.length > 3;   // 4 or 5 buttons need tighter spacing
+        boolean compact = labels.length > 3;   
         int top = compact ? 190 : 215, gap = compact ? 64 : 80, bh = compact ? 52 : 60;
         for (int i = 0; i < labels.length; i++) {
             buttons[i].setBounds(W / 2 - 170, top + i * gap, 340, bh);
@@ -427,7 +526,7 @@ public class GamePanel extends JPanel implements KeyListener {
         Hud.dim(g, W, H, 150);
         Hud.text(g, "LOAD GAME", W / 2, 105, 56, GOLD, 0);
         Hud.text(g, players.isEmpty() ? "No saved players yet. Start a NEW GAME first." : "Choose your player", W / 2, 145, 20, Color.WHITE, 0);
-        if (selected < players.size()) {   // keep the highlighted player inside the visible rows
+        if (selected < players.size()) {   
             if (selected < scroll) scroll = selected;
             if (selected >= scroll + LOAD_ROWS) scroll = selected - LOAD_ROWS + 1;
         }
@@ -453,7 +552,7 @@ public class GamePanel extends JPanel implements KeyListener {
 
     private void drawLeaderboard(Graphics2D g) {
         int n = LB_MODES.length;
-        if (selected < n) lbTab = selected;   // the tab under the cursor is the one shown
+        if (selected < n) lbTab = selected; 
         boolean slayTab = lbTab == n - 1, bossTab = lbTab >= 4 && !slayTab;
         if (lbCacheTab != lbTab) {
             if (slayTab) slayRows = Database.slayers(10); else lbRows = Database.top(LB_MODES[lbTab], 10);
@@ -468,7 +567,7 @@ public class GamePanel extends JPanel implements KeyListener {
             drawButton(g, buttons[i], LB_LABELS[i], i == lbTab, i == 5 ? RED : GOLD, 16);
         }
         int px = 100, py = 140, pw = 760, ph = 370;
-        int[] colX = {440, 590, 730};   // right edge of each stat column
+        int[] colX = {440, 590, 730};   
         g.setColor(new Color(15, 8, 28, 235)); g.fillRect(px, py, pw, ph);
         g.setColor(accent); g.setStroke(new BasicStroke(4)); g.drawRect(px, py, pw, ph);
         String[] head = slayTab ? new String[]{"SLAIN", "NORMAL", "HARDCORE"}
@@ -505,8 +604,8 @@ public class GamePanel extends JPanel implements KeyListener {
     }
 
     private void drawFree(Graphics2D g) {
-        Hud.text(g, "FREE MODE - " + freeSeconds + "s", 40, 50, 26, GOLD, -1);
-        Hud.text(g, "ESC - menu", W - 40, 50, 16, Color.GRAY, 1);
+        Hud.text(g, "SPEED TRIAL - " + freeSeconds + "s", 40, 50, 26, GOLD, -1);
+        Hud.text(g, "ESC - pause", W - 40, 50, 16, Color.GRAY, 1);
         int t = (int) Math.ceil(Math.max(0, timeLeft));
         boolean urgent = freeStarted && timeLeft <= Math.min(10, freeSeconds / 3.0);
         Hud.text(g, String.format("%02d:%02d", t / 60, t % 60), W / 2, 125, 64, urgent && Math.sin(clock * 12) > 0 ? RED : Color.WHITE, 0);
@@ -517,7 +616,7 @@ public class GamePanel extends JPanel implements KeyListener {
         g.setColor(new Color(10, 5, 20, 210)); g.fillRect(px, py, pw, ph);
         g.setColor(GOLD); g.setStroke(new BasicStroke(4)); g.drawRect(px, py, pw, ph);
 
-        int firstLine = Math.max(0, wordLine[freeIdx] - 1);   // 4 visible lines, current word on the 2nd
+        int firstLine = Math.max(0, wordLine[freeIdx] - 1);   
         for (int i = 0; i < freeWords.size(); i++) {
             int row = wordLine[i] - firstLine;
             if (row < 0) continue;
@@ -539,8 +638,10 @@ public class GamePanel extends JPanel implements KeyListener {
 
     private void drawFight(Graphics2D g) {
         drawBoss(g);
+        if (boss.clown() && laughT >= 0) drawLaugh(g);
+        if (boss.horror() && (state == State.INTRO || state == State.FIGHT)) drawDarkness(g);
         drawHud(g);
-        if (state == State.FIGHT) { drawWord(g); Hud.vignette(g, W, H, danger(), clock); }
+        if (state == State.FIGHT) { drawWord(g); if (brownout) drawBrownout(g); Hud.vignette(g, W, H, danger(), clock); }
         if (state == State.LOST) Hud.vignette(g, W, H, 1, clock);
         for (Fx.Pop p : fx.pops())
             Hud.text(g, p.text, (int) p.x, (int) p.y, 44, new Color(255, 230, 80, (int) (255 * Math.min(1, p.life * 1.5))), 0);
@@ -552,6 +653,11 @@ public class GamePanel extends JPanel implements KeyListener {
                 Hud.text(g, boss.name().toUpperCase(), W / 2, 315, 60, GOLD, 0);
                 Hud.text(g, boss.difficulty().label + "  -  " + boss.seconds() + " SECONDS", W / 2, 360, 24, boss.difficulty().color, 0);
                 if (hardcore) Hud.text(g, "HARDCORE: EACH ERROR = -" + (int) HARDCORE_PENALTY + " SECOND", W / 2, 400, 20, RED, 0);
+                if (boss.clown()) Hud.text(g, "SOME WORDS COME BACKWARDS. TYPE WHAT YOU SEE.", W / 2, 440, 20, PINK, 0);
+                if (boss.horror()) {
+                    Hud.text(g, "THE LIGHTS WILL DIE. REMEMBER THE WORD.", W / 2, 440, 20, RED, 0);
+                    Hud.text(g, "IF THE POWER FAILS, TYPE THE LETTERS THAT APPEAR.", W / 2, 470, 18, RED, 0);
+                }
             }
             case DEFEATED -> Hud.text(g, "BOSS DEFEATED!", W / 2, 470, 56, GOLD, 0);
             case RESULTS, LOST -> drawResults(g);
@@ -559,15 +665,77 @@ public class GamePanel extends JPanel implements KeyListener {
         }
     }
 
+    private void drawDarkness(Graphics2D g) {
+        if (darkness == null) {
+            darkness = new BufferedImage(W, H, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D d = darkness.createGraphics();
+            d.setPaint(new RadialGradientPaint(new Point2D.Float(W / 2f, 290), 500,
+                new float[]{0f, 0.3f, 1f}, new Color[]{new Color(0, 0, 0, 0), new Color(0, 0, 0, 60), new Color(0, 0, 0, 245)}));
+            d.fillRect(0, 0, W, H);
+            d.dispose();
+        }
+        Composite old = g.getComposite();
+        float wobble = (float) (0.92 + 0.08 * Math.sin(clock * 13) * Math.sin(clock * 5.3));
+        g.setComposite(AlphaComposite.SrcOver.derive(Math.min(1f, wobble + (state == State.INTRO ? 0.1f : 0f))));
+        g.drawImage(darkness, 0, 0, null);
+        g.setComposite(old);
+        if (state == State.FIGHT && (brownout || flickerOff())) { g.setColor(new Color(0, 0, 0, 240)); g.fillRect(0, 0, W, H); }
+    }
+
+
+    private void drawBrownout(Graphics2D g) {
+        Hud.text(g, "POWER OUT!", W / 2, 170, 40, RED, 0);
+        Hud.text(g, "TYPE THE LETTERS TO TURN THE LIGHTS BACK ON", W / 2, 202, 18, Color.LIGHT_GRAY, 0);
+        int n = brownLetters.length, bw = 84, bh = 104, gap = 14, total = n * bw + (n - 1) * gap;
+        for (int i = 0; i < n; i++) {
+            double appear = brownT - i * 0.12;                                  
+            if (appear <= 0) continue;
+            double s = Math.min(1, 0.4 + appear * 6);
+            boolean done = i < brownIdx, next = i == brownIdx;
+            boolean dim = !done && brownT > 0.5 && Math.sin(brownT * 17 + i * 2.3) * Math.sin(brownT * 5.1 + i) > 0.85;  
+            Color edge = done ? GREEN : next ? GOLD : RED;
+            AffineTransform old = g.getTransform();
+            g.translate(W / 2 + brownX - total / 2 + i * (bw + gap) + bw / 2, brownY + bh / 2);
+            g.scale(s, s);
+            g.setColor(done ? new Color(8, 40, 16, 235) : new Color(40, 8, 14, dim ? 120 : 235)); g.fillRect(-bw / 2, -bh / 2, bw, bh);
+            g.setColor(dim ? edge.darker() : edge); g.setStroke(new BasicStroke(next ? 6 : 4)); g.drawRect(-bw / 2, -bh / 2, bw, bh);
+            Hud.text(g, String.valueOf(Character.toUpperCase(brownLetters[i])), 0, 28, 80, done ? GREEN : dim ? Color.GRAY : Color.WHITE, 0);
+            g.setTransform(old);
+        }
+    }
+
+    private void drawLaugh(Graphics2D g) {
+        double k = laughT / LAUGH_LEN;
+        g.setColor(new Color(255, 60, 200, (int) (45 * (1 - k)))); g.fillRect(0, 0, W, H);
+        for (int i = 0; i < 40; i++) {
+            double r1 = ((i * 7919L) % 1000) / 1000.0, r2 = ((i * 104729L) % 997) / 997.0;
+            int cx = (int) (r1 * W + Math.sin(laughT * 9 + i) * 18), cy = (int) (-20 - r2 * 120 + laughT * (380 + r2 * 300));
+            g.setColor(CONFETTI[i % CONFETTI.length]); g.fillRect(cx, cy, 8, 5 + (i % 3) * 2);
+        }
+        int[][] pos = { {W / 2 - 240, 200}, {W / 2 + 240, 160}, {W / 2 - 190, 110} };
+        String[] has = { "HA", "HA", "HA!" };
+        for (int i = 0; i < 3; i++) {
+            double t = laughT - i * 0.18;
+            if (t < 0) continue;
+            int alpha = (int) (255 * Math.min(1, (1 - k) * 3));
+            Hud.text(g, has[i], pos[i][0], pos[i][1] - (int) (Math.abs(Math.sin(t * 14)) * 14), 46 + (i == 2 ? 10 : 0), new Color(255, 215, 90, Math.max(0, alpha)), 0);
+        }
+    }
+
     private void drawBoss(Graphics2D g) {
         BufferedImage spr = Assets.img(boss.sprite());
         int size = 256, x = W / 2 - size / 2 + (int) (Math.sin(clock * 90) * fx.shake() * 10);
         int y = (int) (120 + Math.sin(clock * 2) * 6 + (state == State.DEFEATED ? stateT * 25 : 0));
+        if (boss.clown() && laughT >= 0) {  
+            double k = 1 - laughT / LAUGH_LEN;
+            x += (int) (Math.sin(clock * 70) * 7 * k);
+            y -= (int) (Math.abs(Math.sin(laughT * 22)) * 18 * k);
+        }
         float alpha = state == State.DEFEATED ? (float) Math.max(0, 1 - stateT / 1.6) : 1f;
         Composite old = g.getComposite();
         g.setComposite(AlphaComposite.SrcOver.derive(alpha));
         g.drawImage(spr, x, y, size, size, null);
-        if (fx.flash() > 0) {   // white flash on hit
+        if (fx.flash() > 0) {   
             g.setComposite(AlphaComposite.SrcOver.derive((float) (alpha * fx.flash())));
             g.drawImage(Assets.silhouette(boss.sprite()), x, y, size, size, null);
         }
@@ -595,16 +763,20 @@ public class GamePanel extends JPanel implements KeyListener {
     }
 
     private void drawWord(Graphics2D g) {
+        if (boss.horror() && (brownout || flickerOff())) return;    
         String w = engine.word();
         int idx = engine.index();
         g.setFont(new Font(Font.MONOSPACED, Font.BOLD, 48));
         int cw = g.getFontMetrics().charWidth('m'), bw = w.length() * cw + 48;
-        double s = Math.min(1, 0.5 + wordAge * 5);   // pop-in when a word appears
+        double s = Math.min(1, 0.5 + wordAge * 5);  
         AffineTransform old = g.getTransform();
+        boolean back = boss.clown() && backwards;
         g.translate(W / 2 + wordOffset, 470);
         g.scale(s, s);
+        if (back) g.rotate(Math.sin(clock * 9) * 0.05);   
         g.setColor(new Color(10, 5, 20, 200)); g.fillRect(-bw / 2, -42, bw, 84);
-        g.setColor(boss.difficulty().color); g.setStroke(new BasicStroke(4)); g.drawRect(-bw / 2, -42, bw, 84);
+        g.setColor(back ? PINK : boss.difficulty().color); g.setStroke(new BasicStroke(4)); g.drawRect(-bw / 2, -42, bw, 84);
+        if (back) Hud.text(g, "BACKWARDS!", 0, -54, 22, PINK, 0);
         int x0 = -w.length() * cw / 2;
         for (int i = 0; i < w.length(); i++) {
             boolean cur = i == idx, err = cur && engine.hasError();
@@ -616,7 +788,6 @@ public class GamePanel extends JPanel implements KeyListener {
         g.setTransform(old);
     }
 
-    /** Shared by boss fights (win / lose) and Free Mode. */
     private void drawResults(Graphics2D g) {
         boolean lost = state == State.LOST, last = !free && bossIdx + 1 == roster.size();
         Color accent = lost ? RED : GOLD;
@@ -626,7 +797,7 @@ public class GamePanel extends JPanel implements KeyListener {
         g.setColor(accent); g.setStroke(new BasicStroke(4)); g.drawRect(px, py, pw, ph);
         String title = free ? "TIME'S UP!" : lost ? "YOU DIED" : last ? "ALL BOSSES SLAIN!" : "BOSS DEFEATED!";
         Hud.text(g, title, W / 2, py + 68, title.length() > 14 || free || lost ? 40 : 46, accent, 0);
-        String sub = free ? "FREE MODE - " + freeSeconds + " SECONDS" : boss.name().toUpperCase() + "  [" + boss.difficulty().label + "]" + (hardcore ? "  HARDCORE" : "");
+        String sub = free ? "SPEED TRIAL - " + freeSeconds + " SECONDS" : boss.name().toUpperCase() + "  [" + boss.difficulty().label + "]" + (hardcore ? "  HARDCORE" : "");
         Hud.text(g, sub, W / 2, py + 104, 20, free ? Color.WHITE : boss.difficulty().color, 0);
 
         String[][] rows = {
@@ -648,8 +819,6 @@ public class GamePanel extends JPanel implements KeyListener {
         }
         Hud.text(g, "ARROWS to select   ENTER to confirm", W / 2, py + ph - 20, 14, Color.GRAY, 0);
     }
-
-    // ---------- input ----------
 
     @Override public void keyTyped(KeyEvent e) {
         char c = e.getKeyChar();

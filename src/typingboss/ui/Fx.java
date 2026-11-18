@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-/** Hit effects: white flash, screen shake, slash animation and floating damage numbers. */
 public class Fx {
     public static final class Pop {
         public final String text;

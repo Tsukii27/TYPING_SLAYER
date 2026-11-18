@@ -6,11 +6,9 @@ import java.awt.Graphics2D;
 import java.awt.RadialGradientPaint;
 import java.awt.geom.Point2D;
 
-/** Small drawing helpers: pixel-ish text with shadow, bars, dim layer and danger vignette. */
 public final class Hud {
     private Hud() {}
 
-    /** align: -1 = left, 0 = center, 1 = right. */
     public static void text(Graphics2D g, String s, int x, int y, int size, Color c, int align) {
         g.setFont(new Font(Font.MONOSPACED, Font.BOLD, size));
         int w = g.getFontMetrics().stringWidth(s), px = align == 0 ? x - w / 2 : align > 0 ? x - w : x;
@@ -31,7 +29,6 @@ public final class Hud {
         g.setColor(new Color(0, 0, 0, alpha)); g.fillRect(0, 0, w, h);
     }
 
-    /** Pulsating red screen edge. intensity 0..1 (higher = stronger and faster pulse). */
     public static void vignette(Graphics2D g, int w, int h, double intensity, double clock) {
         if (intensity <= 0) return;
         double pulse = 0.5 + 0.5 * Math.sin(clock * (4 + 8 * intensity));

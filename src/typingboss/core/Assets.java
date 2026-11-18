@@ -6,7 +6,6 @@ import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Loads and caches PNG sprites from /sprites on the classpath. */
 public final class Assets {
     private static final Map<String, BufferedImage> IMG = new HashMap<>(), SIL = new HashMap<>();
 
@@ -24,7 +23,6 @@ public final class Assets {
         }
     }
 
-    /** Solid white copy of a sprite, used for the hit-flash effect. */
     public static BufferedImage silhouette(String name) {
         BufferedImage cached = SIL.get(name);
         if (cached != null) return cached;
